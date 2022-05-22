@@ -21,6 +21,7 @@ const ROBOSATS_PUBLIC_ORDERS_QUERY = "/api/book/?currency=0&type=2"
 
 var config AppConfig
 var pool nostr.RelayPool
+var torClient *http.Client
 
 type AppConfig struct {
 	TorProxyUrl         string
@@ -135,29 +136,27 @@ func main() {
 	// Init database
 	db := initDb()
 	defer db.Close()
+	// Init Tor client
+	initTorClient()
 	// Get active RoboSats orders
 	orders := getOrderbook()
 
-	if len(orders) == 0 {
-		fmt.Println("No new orders, exiting...")
-	} else {
-		// Loop over all active orders and post new ones
-		for _, order := range orders {
-			var id int
-			err := db.QueryRow("SELECT orderId FROM orders where orderId = ?", order.Id).Scan(&id)
-			if err != nil {
-				// Does not already exist in db
-				if err == sql.ErrNoRows {
-					err := insertOrder(order.Id, db)
-					if err != nil {
-						fmt.Fprintf(os.Stderr, "%s", err)
-						os.Exit(1)
-					}
-					postNewOrderToNostr(order)
-				} else {
+	// Loop over all active orders and post new ones
+	for _, order := range orders {
+		var id int
+		err := db.QueryRow("SELECT orderId FROM orders where orderId = ?", order.Id).Scan(&id)
+		if err != nil {
+			// Does not already exist in db
+			if err == sql.ErrNoRows {
+				err := insertOrder(order.Id, db)
+				if err != nil {
 					fmt.Fprintf(os.Stderr, "%s", err)
 					os.Exit(1)
 				}
+				postNewOrderToNostr(order)
+			} else {
+				fmt.Fprintf(os.Stderr, "%s", err)
+				os.Exit(1)
 			}
 		}
 	}
@@ -215,7 +214,6 @@ func initConfig() {
 		fmt.Fprint(os.Stderr, "\nDatabase password is missing from config\n")
 		os.Exit(1)
 	}
-
 }
 
 // Initializes nostr connection(s)
@@ -242,6 +240,21 @@ func initDb() *sql.DB {
 	db.SetMaxIdleConns(10)
 
 	return db
+}
+
+func initTorClient() {
+	// Parse Tor proxy URL string to a URL type
+	torurl := fmt.Sprintf("%s:%s", config.TorProxyUrl, config.TorProxyPort)
+	torProxyUrl, err := url.Parse(torurl)
+
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error parsing Tor proxy URL: %s. \n%s\n", torProxyUrl, err)
+		os.Exit(1)
+	}
+
+	// Set up a custom HTTP transport to use the proxy and create the client
+	torTransport := &http.Transport{Proxy: http.ProxyURL(torProxyUrl)}
+	torClient = &http.Client{Transport: torTransport, Timeout: time.Second * 30}
 }
 
 func postNewOrderToNostr(order Order) {
@@ -297,36 +310,23 @@ func postNewOrderToNostr(order Order) {
 }
 
 func getOrderbook() []Order {
-	tor := createTorClient()
-	resp, err := tor.Get(config.RobosatsOnionUrl + ROBOSATS_PUBLIC_ORDERS_QUERY)
+	fmt.Println("Fetching orders...")
+	resp, err := torClient.Get(config.RobosatsOnionUrl + ROBOSATS_PUBLIC_ORDERS_QUERY)
 	if err != nil {
 		fmt.Println(err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := ioutil.ReadAll(resp.Body)
-	//fmt.Println(string(body))
+	fmt.Printf("\nGot body: \n%s\n", string(body))
 
 	var orders []Order
 	if err := json.Unmarshal(body, &orders); err != nil {
 		fmt.Println(err)
 	}
+
+	fmt.Printf("\nFound %d orders\n", len(orders))
 	return orders
-}
-
-func createTorClient() *http.Client {
-	// Parse Tor proxy URL string to a URL type
-	torProxyUrl, err := url.Parse(fmt.Sprintf("%s:%s", config.TorProxyUrl, config.TorProxyPort))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error parsing Tor proxy URL: %s. \n%s\n", torProxyUrl, err)
-		os.Exit(1)
-	}
-
-	// Set up a custom HTTP transport to use the proxy and create the client
-	torTransport := &http.Transport{Proxy: http.ProxyURL(torProxyUrl)}
-	client := &http.Client{Transport: torTransport, Timeout: time.Second * 30}
-
-	return client
 }
 
 func insertOrder(orderId int, db *sql.DB) error {
@@ -335,6 +335,6 @@ func insertOrder(orderId int, db *sql.DB) error {
 		return err
 	}
 	defer insert.Close()
-	fmt.Printf("Order added to database: %d\n", orderId)
+	fmt.Printf("\nOrder added to database: %d\n", orderId)
 	return nil
 }
