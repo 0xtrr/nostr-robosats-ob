@@ -13,6 +13,7 @@ import (
 	"time"
 
 	nostr "github.com/fiatjaf/go-nostr"
+	"github.com/fsnotify/fsnotify"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/robfig/cron/v3"
 	"github.com/spf13/viper"
@@ -20,13 +21,13 @@ import (
 
 const ROBOSATS_PUBLIC_ORDERS_QUERY = "/api/book/?currency=0&type=2"
 
+var configPath string
 var config AppConfig
 var pool nostr.RelayPool
 var torClient *http.Client
 
 type AppConfig struct {
 	TorProxyUrl         string
-	TorProxyPort        string
 	NostrPrivkey        string
 	NostrRelays         string
 	RobosatsOnionUrl    string
@@ -171,32 +172,75 @@ func updateOrders() {
 			}
 		}
 	}
-
 }
 
 // Initializes Viper configuration
 func initConfig() {
-	viper.SetConfigName("config")
-	viper.AddConfigPath(".")
-	viper.SetConfigType("yml")
 
-	viper.WatchConfig()
-
-	if err := viper.ReadInConfig(); err != nil {
-		fmt.Fprintf(os.Stderr, "\nError reading config file\n")
+	// Define user config dir
+	userConfigDir, err := os.UserConfigDir()
+	if err != nil {
+		fmt.Printf("Not able to get user config dir\n\n%v\n", err)
 		os.Exit(1)
 	}
-	err := viper.Unmarshal(&config)
-	if err != nil {
+	configPath = fmt.Sprintf("%s/nostr-robosatsob", userConfigDir)
+
+	// Create config dir if missing
+	fmt.Printf("User config dir: %s\n", configPath)
+	mkdirerr := os.MkdirAll(configPath, os.ModePerm)
+	if mkdirerr != nil {
+		fmt.Fprintf(os.Stderr, "%v", mkdirerr)
+		os.Exit(1)
+	}
+
+	// Set config file details
+	viper.SetConfigName("config")
+	viper.AddConfigPath(configPath)
+	viper.SetConfigType("yml")
+
+	// Set defaults
+	viper.SetDefault("torProxyUrl", "")
+	viper.SetDefault("nostrPrivkey", "")
+	viper.SetDefault("nostrRelays", "")
+	viper.SetDefault("robosatsOnionUrl", "http://robosats6tkf3eva7x2voqso3a5wcorsnw34jveyxfqi2fu7oyheasid.onion")
+	viper.SetDefault("robosatsReferralUrl", "")
+	viper.SetDefault("dbUrl", "")
+	viper.SetDefault("dbTable", "")
+	viper.SetDefault("dbUsername", "")
+	viper.SetDefault("dbPassword", "")
+
+	// Handle live change of config
+	viper.OnConfigChange(func(e fsnotify.Event) {
+		fmt.Printf("Config file changed: %s", e.Name)
+	})
+	viper.WatchConfig()
+
+	// Read config from file
+	if err := viper.ReadInConfig(); err != nil {
+		if _, ok := err.(viper.ConfigFileNotFoundError); ok {
+			// If config file doesn't exist we write a new file
+			err := viper.WriteConfigAs(configPath + "/config.yml")
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%v", err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "\nError reading config file\n")
+			os.Exit(1)
+		}
+	}
+
+	unmarshallErr := viper.Unmarshal(&config)
+	if unmarshallErr != nil {
 		fmt.Fprintf(os.Stderr, "\nUnable to decode config file into struct\n")
 		os.Exit(1)
 	}
 
+	// Verify mandatory configuration values
 	if config.NostrRelays == "" {
 		fmt.Fprintf(os.Stderr, "\nNo relays found in config. You must configure at least one relay\n")
 		os.Exit(1)
 	}
-
 	if config.NostrPrivkey == "" {
 		fmt.Printf("Nostr privatekey missing, can't continue\n")
 		os.Exit(1)
@@ -204,12 +248,10 @@ func initConfig() {
 		pubkey, _ := nostr.GetPublicKey(config.NostrPrivkey)
 		fmt.Printf("Using nostr pubkey %s\n", pubkey)
 	}
-
 	if config.RobosatsReferralUrl == "" {
 		fmt.Fprint(os.Stderr, "\nRobosats referral url is missing from config\n")
 		os.Exit(1)
 	}
-
 	if config.DbUrl == "" {
 		fmt.Fprint(os.Stderr, "\nDatabase url is missing from config\n")
 		os.Exit(1)
@@ -256,8 +298,7 @@ func initDb() *sql.DB {
 
 func initTorClient() {
 	// Parse Tor proxy URL string to a URL type
-	torurl := fmt.Sprintf("%s:%s", config.TorProxyUrl, config.TorProxyPort)
-	torProxyUrl, err := url.Parse(torurl)
+	torProxyUrl, err := url.Parse(config.TorProxyUrl)
 
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error parsing Tor proxy URL: %s. \n%s\n", torProxyUrl, err)
