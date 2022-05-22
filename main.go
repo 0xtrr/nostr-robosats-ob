@@ -14,6 +14,7 @@ import (
 
 	nostr "github.com/fiatjaf/go-nostr"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/robfig/cron/v3"
 	"github.com/spf13/viper"
 )
 
@@ -133,11 +134,21 @@ func main() {
 	initConfig()
 	// Initialize nostr pool connection(s)
 	initPool()
+	// Init Tor client
+	initTorClient()
+
+	c := cron.New()
+	c.AddFunc("@every 5m", updateOrders)
+	c.Start()
+	defer c.Stop()
+	select {}
+}
+
+func updateOrders() {
 	// Init database
 	db := initDb()
 	defer db.Close()
-	// Init Tor client
-	initTorClient()
+
 	// Get active RoboSats orders
 	orders := getOrderbook()
 
@@ -160,6 +171,7 @@ func main() {
 			}
 		}
 	}
+
 }
 
 // Initializes Viper configuration
